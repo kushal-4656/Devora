@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+chat/
+venv/
+env/
+.venv/
+frontend/node_modules/
+cosmos_backup.json
+README.md
