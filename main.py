@@ -81,7 +81,10 @@ def get_session_id(request: Request) -> str:
         token = auth_header.split(" ")[1]
         try:
             payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-            return payload.get("sub", "default_session")
+            sub = payload.get("sub", "default_session")
+            if sub != "default_session":
+                return sub.strip().lower()
+            return sub
         except jwt.ExpiredSignatureError:
             pass
         except jwt.InvalidTokenError:
@@ -119,25 +122,27 @@ def signup(req: AuthRequest):
         raise HTTPException(status_code=400, detail="Invalid email format")
     if not req.is_valid_password:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters long, include 1 uppercase, 1 lowercase, 1 digit, and 1 symbol.")
-    user = get_user_by_email(req.email)
+    normalized_email = req.email.strip().lower()
+    user = get_user_by_email(normalized_email)
     if user:
         raise HTTPException(status_code=400, detail="Email already exists")
     
     hashed = bcrypt.hashpw(req.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-    create_user(req.email, hashed)
+    create_user(normalized_email, hashed)
     
     token = jwt.encode({
-        "sub": req.email,
+        "sub": normalized_email,
         "exp": datetime.utcnow() + timedelta(days=7)
     }, JWT_SECRET, algorithm=JWT_ALGORITHM)
     
-    return {"status": "success", "token": token, "email": req.email}
+    return {"status": "success", "token": token, "email": normalized_email}
 
 @app.post("/login")
 def login(req: AuthRequest):
     if not req.is_valid_email:
         raise HTTPException(status_code=400, detail="Invalid email format")
-    user = get_user_by_email(req.email)
+    normalized_email = req.email.strip().lower()
+    user = get_user_by_email(normalized_email)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
     
@@ -145,23 +150,24 @@ def login(req: AuthRequest):
         raise HTTPException(status_code=401, detail="Invalid email or password")
         
     token = jwt.encode({
-        "sub": req.email,
+        "sub": normalized_email,
         "exp": datetime.utcnow() + timedelta(days=7)
     }, JWT_SECRET, algorithm=JWT_ALGORITHM)
     
-    return {"status": "success", "token": token, "email": req.email}
+    return {"status": "success", "token": token, "email": normalized_email}
 
 @app.post("/reset-password")
 def reset_password(req: ResetPasswordRequest):
     if not validate_password(req.new_password):
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters long, include 1 uppercase, 1 lowercase, 1 digit, and 1 symbol.")
     
-    user = get_user_by_email(req.email)
+    normalized_email = req.email.strip().lower()
+    user = get_user_by_email(normalized_email)
     if not user:
         raise HTTPException(status_code=404, detail="Email not found")
         
     hashed = bcrypt.hashpw(req.new_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-    if not update_user_password(req.email, hashed):
+    if not update_user_password(normalized_email, hashed):
         raise HTTPException(status_code=500, detail="Failed to update password")
     
     return {"status": "success", "message": "Password updated successfully"}
@@ -211,8 +217,15 @@ def chat_endpoint(req: ChatRequest, request: Request):
     # Save user message
     save_message(chat_id, "user", req.message)
     
-    # Get chat history (last 10 messages = 5 turns)
-    chat_history = get_chat_history(chat_id, turn=5)
+    # Get chat history (last 40 messages = 20 turns)
+    chat_history = get_chat_history(chat_id, turn=20)
+    
+    # Get user's past topics for personalization
+    email = session_id if session_id != "default_session" else None
+    all_chats = get_all_chats(email)
+    past_topics = [c["title"] for c in all_chats if c["id"] != chat_id]
+    # Keep only the most recent topics
+    past_topics = past_topics[:10]
     
     personality = session.get("personality", "Friend")
     mode = session.get("mode", "Normal Mode")
@@ -220,7 +233,7 @@ def chat_endpoint(req: ChatRequest, request: Request):
     def event_generator():
         full_reply = ""
         try:
-            for chunk in chat_stream(chat_history, personality=personality, mode=mode):
+            for chunk in chat_stream(chat_history, personality=personality, mode=mode, past_topics=past_topics):
                 full_reply += chunk
                 yield f"data: {json.dumps({'chunk': chunk, 'chat_id': chat_id})}\n\n"
             

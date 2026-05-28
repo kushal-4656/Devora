@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Send, Mic, Copy, Volume2, VolumeX, Plus, MessageSquare, Menu, X, Play, Pause, Edit2, LogOut } from 'lucide-react';
 import { Navigate, useNavigate } from 'react-router-dom';
+import * as speechSdk from 'microsoft-cognitiveservices-speech-sdk';
 import './styles/index.css';
 
 const API_BASE = import.meta.env.PROD ? '' : 'http://localhost:8000';
@@ -25,11 +26,31 @@ function App() {
   const [screenReaderAnnouncement, setScreenReaderAnnouncement] = useState('');
   const [editingMessageIdx, setEditingMessageIdx] = useState(null);
   const inputRef = useRef(null);
+  const synthesizerRef = useRef(null);
+  const playerRef = useRef(null);
+  const recognizerRef = useRef(null);
+  const newChatBtnRef = useRef(null);
+
+  // Focus management for sidebar
+  useEffect(() => {
+    if (sidebarOpen) {
+      setTimeout(() => newChatBtnRef.current?.focus(), 100);
+    }
+  }, [sidebarOpen]);
 
   // Stop speech when window is closed or refreshed
   useEffect(() => {
     const handleBeforeUnload = () => {
       window.speechSynthesis.cancel();
+      if (playerRef.current) {
+        playerRef.current.pause();
+      }
+      if (synthesizerRef.current) {
+        synthesizerRef.current.close();
+      }
+      if (recognizerRef.current) {
+        recognizerRef.current.close();
+      }
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
@@ -111,6 +132,13 @@ function App() {
 
     // ALWAYS stop speaking when generating a new response, just in case
     window.speechSynthesis.cancel();
+    if (playerRef.current) {
+      playerRef.current.pause();
+    }
+    if (synthesizerRef.current) {
+      synthesizerRef.current.close();
+      synthesizerRef.current = null;
+    }
     if (currentlySpeaking !== null || speakState === 'playing') {
       setCurrentlySpeaking(null);
       setSpeakState('stopped');
@@ -216,52 +244,130 @@ function App() {
   const toggleSpeak = async (idx, text) => {
     if (currentlySpeaking === idx && speakState === 'playing') {
       window.speechSynthesis.cancel();
+      if (playerRef.current) {
+        playerRef.current.pause();
+      }
+      if (synthesizerRef.current) {
+        synthesizerRef.current.close();
+        synthesizerRef.current = null;
+      }
       setSpeakState('stopped');
       setCurrentlySpeaking(null);
     } else {
       // Force stop any existing speech before starting new
       window.speechSynthesis.cancel();
+      if (playerRef.current) {
+        playerRef.current.pause();
+      }
+      if (synthesizerRef.current) {
+        synthesizerRef.current.close();
+        synthesizerRef.current = null;
+      }
       
       setCurrentlySpeaking(idx);
       setSpeakState('playing');
       
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.onend = () => {
-        setCurrentlySpeaking(prev => {
-          if (prev === idx) {
+      try {
+        const tokenRes = await fetch(`${API_BASE}/api/speech-token`, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (!tokenRes.ok) throw new Error('Failed to get speech token');
+        const tokenData = await tokenRes.json();
+        
+        const speechConfig = speechSdk.SpeechConfig.fromAuthorizationToken(tokenData.token, tokenData.region);
+        
+        // Match voice to personality if possible
+        if (personality === 'Teacher') {
+          speechConfig.speechSynthesisVoiceName = 'en-US-DavisNeural';
+        } else if (personality === 'Mentor') {
+          speechConfig.speechSynthesisVoiceName = 'en-US-GuyNeural';
+        } else {
+          speechConfig.speechSynthesisVoiceName = 'en-US-AriaNeural'; // Default/Friend
+        }
+        
+        const player = new speechSdk.SpeakerAudioDestination();
+        playerRef.current = player;
+        const audioConfig = speechSdk.AudioConfig.fromSpeakerOutput(player);
+        const synthesizer = new speechSdk.SpeechSynthesizer(speechConfig, audioConfig);
+        synthesizerRef.current = synthesizer;
+        
+        synthesizer.speakTextAsync(
+          text,
+          result => {
+            if (result.reason === speechSdk.ResultReason.SynthesizingAudioCompleted) {
+              setCurrentlySpeaking(prev => {
+                if (prev === idx) {
+                  setSpeakState('stopped');
+                  return null;
+                }
+                return prev;
+              });
+            } else {
+              console.error("Speech synthesis canceled, " + result.errorDetails);
+              setSpeakState('stopped');
+              setCurrentlySpeaking(null);
+            }
+            synthesizer.close();
+            if (synthesizerRef.current === synthesizer) {
+              synthesizerRef.current = null;
+            }
+          },
+          error => {
+            console.error("Error synthesizing speech", error);
+            synthesizer.close();
+            if (synthesizerRef.current === synthesizer) {
+              synthesizerRef.current = null;
+            }
             setSpeakState('stopped');
-            return null;
+            setCurrentlySpeaking(null);
           }
-          return prev;
-        });
-      };
-      utterance.onerror = (e) => {
-        console.error("Speech error", e);
-        setCurrentlySpeaking(prev => {
-          if (prev === idx) {
-            setSpeakState('stopped');
-            return null;
-          }
-          return prev;
-        });
-      };
-      window.speechSynthesis.speak(utterance);
+        );
+      } catch (e) {
+        console.error("TTS fetch error", e);
+        setSpeakState('stopped');
+        setCurrentlySpeaking(null);
+      }
     }
   };
 
   const startListening = async () => {
+    if (isRecording) {
+      if (recognizerRef.current) {
+        recognizerRef.current.close();
+        recognizerRef.current = null;
+      }
+      setIsRecording(false);
+      return;
+    }
     try {
       setIsRecording(true);
-      const res = await fetch(`${API_BASE}/listen`, { headers: { 'Authorization': `Bearer ${token}` } });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.text) {
-            handleSend(data.text);
+      
+      const tokenRes = await fetch(`${API_BASE}/api/speech-token`, { headers: { 'Authorization': `Bearer ${token}` } });
+      if (!tokenRes.ok) throw new Error('Failed to get speech token');
+      const tokenData = await tokenRes.json();
+      
+      const speechConfig = speechSdk.SpeechConfig.fromAuthorizationToken(tokenData.token, tokenData.region);
+      speechConfig.speechRecognitionLanguage = 'en-US';
+      const audioConfig = speechSdk.AudioConfig.fromDefaultMicrophoneInput();
+      const recognizer = new speechSdk.SpeechRecognizer(speechConfig, audioConfig);
+      recognizerRef.current = recognizer;
+      
+      recognizer.recognizeOnceAsync(result => {
+        if (result.reason === speechSdk.ResultReason.RecognizedSpeech) {
+          handleSend(result.text);
+        } else {
+          console.error("Speech not recognized: ", result);
         }
-      }
+        recognizer.close();
+        if (recognizerRef.current === recognizer) recognizerRef.current = null;
+        setIsRecording(false);
+      }, err => {
+        console.error("Speech recognition error: ", err);
+        recognizer.close();
+        if (recognizerRef.current === recognizer) recognizerRef.current = null;
+        setIsRecording(false);
+      });
+      
     } catch (e) {
       console.error("Listen error", e);
-    } finally {
       setIsRecording(false);
     }
   };
@@ -296,7 +402,7 @@ function App() {
             </button>
           </div>
         </div>
-        <button className="new-chat-btn" onClick={startNewChat}>
+        <button ref={newChatBtnRef} className="new-chat-btn" onClick={startNewChat}>
           <Plus size={18} /> New Chat
         </button>
         <div className="chat-list">
@@ -329,7 +435,7 @@ function App() {
           ) : (
             messages.map((msg, idx) => (
               <div key={idx} className={`message-wrapper ${msg.role}`}>
-                <h3 className="sr-only">{msg.role === 'user' ? 'You said:' : 'AI Assistant said:'}</h3>
+                <h3 className="sr-only">{msg.role === 'user' ? 'You said:' : 'Devora said:'}</h3>
                 <div className={`message ${msg.role}`}>
                   <div className={`markdown-body ${isTyping && idx === messages.length - 1 && msg.role === 'assistant' ? 'typing' : ''}`}>
                     {msg.role === 'assistant' ? (
@@ -432,9 +538,8 @@ function App() {
             />
             <button 
               className={`mic-btn ${isRecording ? 'recording' : ''}`} 
-              aria-label="Voice input"
+              aria-label={isRecording ? "Stop recording" : "Voice input"}
               onClick={startListening}
-              disabled={isRecording}
             >
               <Mic size={20} />
             </button>

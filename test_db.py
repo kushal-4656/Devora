@@ -69,7 +69,7 @@ def create_chat(title: str = "New Chat", email: str = None) -> str:
     new_chat = {
         "id": chat_id,
         "title": title,
-        "email": email
+        "email": email.strip().lower() if email else None
     }
     chats_container.create_item(body=new_chat)
     return chat_id
@@ -89,6 +89,7 @@ def get_chat(chat_id: str) -> dict:
 
 def get_all_chats(email: str = None) -> list:
     if email:
+        email = email.strip().lower()
         query = "SELECT c.id, c.title FROM c WHERE c.email = @email"
         param = [{"name": "@email", "value": email}]
         items = list(chats_container.query_items(query=query, parameters=param, enable_cross_partition_query=True))
@@ -142,6 +143,7 @@ def truncate_chat_after(chat_id: str, message_id: str):
             messages_container.delete_item(item=msg["id"], partition_key=chat_id)
 
 def create_user(email: str, password_hash: str):
+    email = email.strip().lower()
     item = {
         "id": str(uuid.uuid4()),
         "email": email,
@@ -151,12 +153,18 @@ def create_user(email: str, password_hash: str):
     return item
 
 def get_user_by_email(email: str):
+    if not email:
+        return None
+    email = email.strip().lower()
     query = "SELECT * FROM c WHERE c.email = @email"
     param = [{"name": "@email", "value": email}]
     items = list(users_container.query_items(query=query, parameters=param, partition_key=email))
     return items[0] if items else None
 
 def update_user_password(email: str, new_password_hash: str):
+    if not email:
+        return False
+    email = email.strip().lower()
     user = get_user_by_email(email)
     if user:
         user["password_hash"] = new_password_hash
