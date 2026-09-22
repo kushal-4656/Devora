@@ -5,8 +5,8 @@ import { Send, Mic, Copy, Volume2, VolumeX, Plus, MessageSquare, Menu, X, Play, 
 import { Navigate, useNavigate } from 'react-router-dom';
 import * as speechSdk from 'microsoft-cognitiveservices-speech-sdk';
 import './styles/index.css';
-
-const API_BASE = import.meta.env.PROD ? '' : 'http://localhost:8000';
+import { API_BASE } from './config';
+import { speak, stopSpeak } from './speech';
 
 function App() {
   const navigate = useNavigate();
@@ -26,10 +26,9 @@ function App() {
   const [screenReaderAnnouncement, setScreenReaderAnnouncement] = useState('');
   const [editingMessageIdx, setEditingMessageIdx] = useState(null);
   const inputRef = useRef(null);
-  const synthesizerRef = useRef(null);
-  const playerRef = useRef(null);
   const recognizerRef = useRef(null);
   const newChatBtnRef = useRef(null);
+
 
   // Focus management for sidebar
   useEffect(() => {
@@ -41,20 +40,18 @@ function App() {
   // Stop speech when window is closed or refreshed
   useEffect(() => {
     const handleBeforeUnload = () => {
-      window.speechSynthesis.cancel();
-      if (playerRef.current) {
-        playerRef.current.pause();
-      }
-      if (synthesizerRef.current) {
-        synthesizerRef.current.close();
-      }
+      stopSpeak();
       if (recognizerRef.current) {
         recognizerRef.current.close();
       }
     };
     window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      stopSpeak();
+    };
   }, [token]);
+
 
   // Auto-scroll to bottom
   const scrollToBottom = () => {
@@ -84,6 +81,9 @@ function App() {
   };
 
   const loadChat = async (chatId) => {
+    stopSpeak();
+    setCurrentlySpeaking(null);
+    setSpeakState('stopped');
     try {
       const res = await fetch(`${API_BASE}/chat/${chatId}`, { headers: { 'Authorization': `Bearer ${token}` } });
       if (!res.ok) throw new Error("Failed to load chat");
@@ -99,6 +99,9 @@ function App() {
   };
 
   const startNewChat = () => {
+    stopSpeak();
+    setCurrentlySpeaking(null);
+    setSpeakState('stopped');
     setCurrentChatId(null);
     setMessages([]);
     // Auto-close sidebar on mobile after starting new chat
@@ -130,19 +133,13 @@ function App() {
     const textToSend = overrideText !== null ? overrideText : input;
     if (!textToSend.trim()) return;
 
-    // ALWAYS stop speaking when generating a new response, just in case
-    window.speechSynthesis.cancel();
-    if (playerRef.current) {
-      playerRef.current.pause();
-    }
-    if (synthesizerRef.current) {
-      synthesizerRef.current.close();
-      synthesizerRef.current = null;
-    }
+    // ALWAYS stop speaking when generating a new response
+    stopSpeak();
     if (currentlySpeaking !== null || speakState === 'playing') {
       setCurrentlySpeaking(null);
       setSpeakState('stopped');
     }
+
 
     let targetChatId = currentChatId;
     let newMessagesList = [...messages];
@@ -243,83 +240,35 @@ function App() {
 
   const toggleSpeak = async (idx, text) => {
     if (currentlySpeaking === idx && speakState === 'playing') {
-      window.speechSynthesis.cancel();
-      if (playerRef.current) {
-        playerRef.current.pause();
-      }
-      if (synthesizerRef.current) {
-        synthesizerRef.current.close();
-        synthesizerRef.current = null;
-      }
+      stopSpeak();
       setSpeakState('stopped');
       setCurrentlySpeaking(null);
     } else {
-      // Force stop any existing speech before starting new
-      window.speechSynthesis.cancel();
-      if (playerRef.current) {
-        playerRef.current.pause();
-      }
-      if (synthesizerRef.current) {
-        synthesizerRef.current.close();
-        synthesizerRef.current = null;
-      }
-      
+      stopSpeak();
       setCurrentlySpeaking(idx);
       setSpeakState('playing');
-      
+
       try {
         const tokenRes = await fetch(`${API_BASE}/api/speech-token`, { headers: { 'Authorization': `Bearer ${token}` } });
         if (!tokenRes.ok) throw new Error('Failed to get speech token');
         const tokenData = await tokenRes.json();
-        
-        const speechConfig = speechSdk.SpeechConfig.fromAuthorizationToken(tokenData.token, tokenData.region);
-        
-        // Match voice to personality if possible
+
+        let voiceName = 'en-US-AriaNeural'; // Default/Friend
         if (personality === 'Teacher') {
-          speechConfig.speechSynthesisVoiceName = 'en-US-DavisNeural';
+          voiceName = 'en-US-DavisNeural';
         } else if (personality === 'Mentor') {
-          speechConfig.speechSynthesisVoiceName = 'en-US-GuyNeural';
-        } else {
-          speechConfig.speechSynthesisVoiceName = 'en-US-AriaNeural'; // Default/Friend
+          voiceName = 'en-US-GuyNeural';
         }
-        
-        const player = new speechSdk.SpeakerAudioDestination();
-        playerRef.current = player;
-        const audioConfig = speechSdk.AudioConfig.fromSpeakerOutput(player);
-        const synthesizer = new speechSdk.SpeechSynthesizer(speechConfig, audioConfig);
-        synthesizerRef.current = synthesizer;
-        
-        synthesizer.speakTextAsync(
-          text,
-          result => {
-            if (result.reason === speechSdk.ResultReason.SynthesizingAudioCompleted) {
-              setCurrentlySpeaking(prev => {
-                if (prev === idx) {
-                  setSpeakState('stopped');
-                  return null;
-                }
-                return prev;
-              });
-            } else {
-              console.error("Speech synthesis canceled, " + result.errorDetails);
-              setSpeakState('stopped');
-              setCurrentlySpeaking(null);
-            }
-            synthesizer.close();
-            if (synthesizerRef.current === synthesizer) {
-              synthesizerRef.current = null;
-            }
-          },
-          error => {
-            console.error("Error synthesizing speech", error);
-            synthesizer.close();
-            if (synthesizerRef.current === synthesizer) {
-              synthesizerRef.current = null;
-            }
+
+        await speak(text, {
+          token: tokenData.token,
+          region: tokenData.region,
+          voiceName: voiceName,
+          onEnd: () => {
+            setCurrentlySpeaking(prev => (prev === idx ? null : prev));
             setSpeakState('stopped');
-            setCurrentlySpeaking(null);
           }
-        );
+        });
       } catch (e) {
         console.error("TTS fetch error", e);
         setSpeakState('stopped');
@@ -327,6 +276,7 @@ function App() {
       }
     }
   };
+
 
   const startListening = async () => {
     if (isRecording) {

@@ -1,25 +1,31 @@
-# Stage 1: Build the frontend
-FROM node:18-alpine AS frontend-builder
-WORKDIR /app/frontend
-COPY frontend/package*.json ./
-RUN npm install
-COPY frontend/ .
-RUN npm run build
-
-# Stage 2: Build the backend
 FROM python:3.11-slim
+
+# Set working directory
 WORKDIR /app
 
-# Install system dependencies if required
-# RUN apt-get update && apt-get install -y <packages> && rm -rf /var/lib/apt/lists/*
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PORT=8000
 
+# Install system dependencies (ca-certificates for secure HTTPS requests, curl for container health checks)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py chat.py speech.py test_db.py .
+# Copy backend application source code
+COPY main.py chat.py speech.py test_db.py ./
 
-# Copy the built frontend from Stage 1
-COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+# Expose service port
+EXPOSE 8000
 
-ENV PORT=8000
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
+# Health check to ensure service is responding
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/health || exit 1
+
+# Start FastAPI application with uvicorn (respecting Render's dynamic $PORT)
+CMD ["sh", "-c", "exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

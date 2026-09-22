@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: devora-backend
+    env: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: chat_api
+        sync: false
+      - key: azure_speech_key
+        sync: false
+      - key: azure_speech_region
+        value: centralindia
+      - key: azure_cosmos_uri
+        sync: false
+      - key: azure_cosmos_key
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: JWT_EXPIRE_DAYS
+        value: 7
+      - key: ALLOWED_ORIGINS
+        value: http://localhost:5173

@@ -9,6 +9,6 @@ chat/
 venv/
 env/
 .venv/
-frontend/node_modules/
+frontend/
 cosmos_backup.json
 README.md

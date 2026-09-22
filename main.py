@@ -1,5 +1,6 @@
 import uuid
 import json
+import os
 from fastapi import FastAPI, HTTPException, Request, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
@@ -13,21 +14,31 @@ import bcrypt
 import jwt
 from datetime import datetime, timedelta
 
-JWT_SECRET = "super_secret_production_key_12345"
-JWT_ALGORITHM = "HS256"
-
-import requests
-import os
 from dotenv import load_dotenv
 
 load_dotenv()
-speech_key=os.getenv("azure_speech_key")
-speech_region=os.getenv("azure_speech_region")
+JWT_SECRET = os.getenv("JWT_SECRET", "super_secret_production_key_12345")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+try:
+    JWT_EXPIRE_DAYS = int(os.getenv("JWT_EXPIRE_DAYS", "7"))
+except ValueError:
+    JWT_EXPIRE_DAYS = 7
 
-app = FastAPI()
+speech_key = os.getenv("azure_speech_key")
+speech_region = os.getenv("azure_speech_region")
+
+app = FastAPI(title="Devora Backend API", version="1.0.0")
+
+# Configure CORS for decoupled frontend (Vercel) & local development
+raw_origins = os.getenv("ALLOWED_ORIGINS", "")
+allowed_origins = [orig.strip() for orig in raw_origins.split(",") if orig.strip()]
+if not allowed_origins:
+    allowed_origins = ["http://localhost:5173", "http://localhost:3000", "*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
+    allow_origin_regex=r"^https://.*\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -95,6 +106,19 @@ def get_session_id(request: Request) -> str:
         session_id = "default_session"
     return session_id
 
+@app.get("/")
+def root():
+    return {
+        "status": "healthy",
+        "service": "Devora Backend API",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/health",
+            "docs": "/docs",
+            "chat": "/chat"
+        }
+    }
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -132,7 +156,7 @@ def signup(req: AuthRequest):
     
     token = jwt.encode({
         "sub": normalized_email,
-        "exp": datetime.utcnow() + timedelta(days=7)
+        "exp": datetime.utcnow() + timedelta(days=JWT_EXPIRE_DAYS)
     }, JWT_SECRET, algorithm=JWT_ALGORITHM)
     
     return {"status": "success", "token": token, "email": normalized_email}
@@ -151,7 +175,7 @@ def login(req: AuthRequest):
         
     token = jwt.encode({
         "sub": normalized_email,
-        "exp": datetime.utcnow() + timedelta(days=7)
+        "exp": datetime.utcnow() + timedelta(days=JWT_EXPIRE_DAYS)
     }, JWT_SECRET, algorithm=JWT_ALGORITHM)
     
     return {"status": "success", "token": token, "email": normalized_email}
@@ -244,7 +268,15 @@ def chat_endpoint(req: ChatRequest, request: Request):
             print(f"Streaming error: {e}")
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
             
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 # Serve React frontend
 frontend_dist = os.path.join(os.path.dirname(__file__), "frontend", "dist")

@@ -2,8 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Eye, EyeOff, Brain } from 'lucide-react';
 import { useNavigate, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
-
-const API_BASE = import.meta.env.PROD ? '' : 'http://localhost:8000';
+import { API_BASE } from './config';
 
 export default function ForgotPassword() {
   const navigate = useNavigate();
