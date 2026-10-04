@@ -54,7 +54,11 @@ chatbought/
 ├── Dockerfile              # Production multi-stage Dockerfile for backend
 ├── render.yaml             # Render Blueprint for automated backend deployment
 ├── requirements.txt        # Python backend dependencies
-├── main.py                 # FastAPI application, auth routes, and API endpoints
+├── main.py                 # FastAPI application routes & endpoints
+├── config.py               # Environment configuration and CORS settings
+├── schemas.py              # Pydantic models and request validation
+├── auth.py                 # JWT token management and password hashing
+├── services.py             # External service wrappers (Azure Speech)
 ├── chat.py                 # Gemini prompt engineering and SSE streaming logic
 ├── speech.js               # Standalone Azure Speech synthesis & playback helper
 ├── test_db.py              # Cosmos DB connection and health check utility

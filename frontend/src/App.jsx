@@ -6,7 +6,7 @@ import { Navigate, useNavigate } from 'react-router-dom';
 import * as speechSdk from 'microsoft-cognitiveservices-speech-sdk';
 import './styles/index.css';
 import { API_BASE } from './config';
-import { speak, stopSpeak } from './speech';
+import { speak, stopSpeak, playPersonalityChime, getPersonalityConfig, PERSONALITY_PROFILES } from './speech';
 
 function App() {
   const navigate = useNavigate();
@@ -112,11 +112,15 @@ function App() {
   const handlePersonalityChange = async (e) => {
     const val = e.target.value;
     setPersonality(val);
-    await fetch(`${API_BASE}/set-personality`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({ personality: val })
-    });
+    try {
+      await fetch(`${API_BASE}/set-personality`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ personality: val })
+      });
+    } catch (err) {
+      console.warn("Could not sync personality with server:", err);
+    }
   };
 
   const handleModeChange = async (e) => {
@@ -249,28 +253,32 @@ function App() {
       setSpeakState('playing');
 
       try {
-        const tokenRes = await fetch(`${API_BASE}/api/speech-token`, { headers: { 'Authorization': `Bearer ${token}` } });
-        if (!tokenRes.ok) throw new Error('Failed to get speech token');
-        const tokenData = await tokenRes.json();
-
-        let voiceName = 'en-US-AriaNeural'; // Default/Friend
-        if (personality === 'Teacher') {
-          voiceName = 'en-US-DavisNeural';
-        } else if (personality === 'Mentor') {
-          voiceName = 'en-US-GuyNeural';
+        let tokenData = null;
+        try {
+          const tokenRes = await fetch(`${API_BASE}/api/speech-token`, { 
+            headers: token ? { 'Authorization': `Bearer ${token}` } : {} 
+          });
+          if (tokenRes.ok) {
+            tokenData = await tokenRes.json();
+          }
+        } catch (fetchErr) {
+          console.warn("Could not retrieve Azure speech token, using browser speech engine fallback:", fetchErr);
         }
 
         await speak(text, {
-          token: tokenData.token,
-          region: tokenData.region,
-          voiceName: voiceName,
+          personality: personality,
+          token: tokenData?.token,
+          region: tokenData?.region,
+          onStart: () => {
+            setSpeakState('playing');
+          },
           onEnd: () => {
             setCurrentlySpeaking(prev => (prev === idx ? null : prev));
             setSpeakState('stopped');
           }
         });
       } catch (e) {
-        console.error("TTS fetch error", e);
+        console.error("Audio playback error:", e);
         setSpeakState('stopped');
         setCurrentlySpeaking(null);
       }
@@ -281,7 +289,7 @@ function App() {
   const startListening = async () => {
     if (isRecording) {
       if (recognizerRef.current) {
-        recognizerRef.current.close();
+        try { recognizerRef.current.close?.() || recognizerRef.current.stop?.(); } catch (_) {}
         recognizerRef.current = null;
       }
       setIsRecording(false);
@@ -290,32 +298,60 @@ function App() {
     try {
       setIsRecording(true);
       
-      const tokenRes = await fetch(`${API_BASE}/api/speech-token`, { headers: { 'Authorization': `Bearer ${token}` } });
-      if (!tokenRes.ok) throw new Error('Failed to get speech token');
-      const tokenData = await tokenRes.json();
-      
-      const speechConfig = speechSdk.SpeechConfig.fromAuthorizationToken(tokenData.token, tokenData.region);
-      speechConfig.speechRecognitionLanguage = 'en-US';
-      const audioConfig = speechSdk.AudioConfig.fromDefaultMicrophoneInput();
-      const recognizer = new speechSdk.SpeechRecognizer(speechConfig, audioConfig);
-      recognizerRef.current = recognizer;
-      
-      recognizer.recognizeOnceAsync(result => {
-        if (result.reason === speechSdk.ResultReason.RecognizedSpeech) {
-          handleSend(result.text);
-        } else {
-          console.error("Speech not recognized: ", result);
+      let tokenData = null;
+      try {
+        const tokenRes = await fetch(`${API_BASE}/api/speech-token`, { 
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {} 
+        });
+        if (tokenRes.ok) {
+          tokenData = await tokenRes.json();
         }
-        recognizer.close();
-        if (recognizerRef.current === recognizer) recognizerRef.current = null;
-        setIsRecording(false);
-      }, err => {
-        console.error("Speech recognition error: ", err);
-        recognizer.close();
-        if (recognizerRef.current === recognizer) recognizerRef.current = null;
-        setIsRecording(false);
-      });
+      } catch (_) {}
       
+      if (tokenData && tokenData.token) {
+        const speechConfig = speechSdk.SpeechConfig.fromAuthorizationToken(tokenData.token, tokenData.region);
+        speechConfig.speechRecognitionLanguage = 'en-US';
+        const audioConfig = speechSdk.AudioConfig.fromDefaultMicrophoneInput();
+        const recognizer = new speechSdk.SpeechRecognizer(speechConfig, audioConfig);
+        recognizerRef.current = recognizer;
+        
+        recognizer.recognizeOnceAsync(result => {
+          if (result.reason === speechSdk.ResultReason.RecognizedSpeech) {
+            handleSend(result.text);
+          } else {
+            console.error("Speech not recognized: ", result);
+          }
+          try { recognizer.close(); } catch (_) {}
+          if (recognizerRef.current === recognizer) recognizerRef.current = null;
+          setIsRecording(false);
+        }, err => {
+          console.error("Speech recognition error: ", err);
+          try { recognizer.close(); } catch (_) {}
+          if (recognizerRef.current === recognizer) recognizerRef.current = null;
+          setIsRecording(false);
+        });
+      } else {
+        // Fallback to browser SpeechRecognition if available
+        const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SpeechRec) {
+          const rec = new SpeechRec();
+          rec.lang = 'en-US';
+          rec.continuous = false;
+          rec.interimResults = false;
+          recognizerRef.current = rec;
+          rec.onresult = (evt) => {
+            const transcript = evt.results?.[0]?.[0]?.transcript;
+            if (transcript) handleSend(transcript);
+            setIsRecording(false);
+          };
+          rec.onerror = () => setIsRecording(false);
+          rec.onend = () => setIsRecording(false);
+          rec.start();
+        } else {
+          alert("Speech recognition is not supported in this browser or backend speech token is unavailable.");
+          setIsRecording(false);
+        }
+      }
     } catch (e) {
       console.error("Listen error", e);
       setIsRecording(false);
@@ -431,7 +467,12 @@ function App() {
                       <button className="action-btn" onClick={() => copyToClipboard(msg.content)} aria-label="Copy message">
                         <Copy size={16} />
                       </button>
-                      <button className={`action-btn ${currentlySpeaking === idx ? 'speaking' : ''}`} onClick={() => toggleSpeak(idx, msg.content)} aria-label={currentlySpeaking === idx && speakState === 'playing' ? "Pause speaking" : "Listen to message"}>
+                      <button 
+                        className={`action-btn ${currentlySpeaking === idx ? 'speaking' : ''}`} 
+                        onClick={() => toggleSpeak(idx, msg.content)} 
+                        aria-label={currentlySpeaking === idx && speakState === 'playing' ? `Pause speaking` : `Listen with ${personality} sound & voice`}
+                        title={currentlySpeaking === idx && speakState === 'playing' ? `Pause speaking` : `Play message with ${personality} sound & voice`}
+                      >
                         {currentlySpeaking === idx && speakState === 'playing' ? <Pause size={16} /> : <Play size={16} />}
                       </button>
                     </div>

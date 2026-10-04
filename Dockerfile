@@ -18,7 +18,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend application source code
-COPY main.py chat.py speech.py test_db.py ./
+COPY *.py ./
 
 # Expose service port
 EXPOSE 8000
